@@ -92,8 +92,26 @@ python3 surf_alert.py
 
 ### Automated Daily Alerts
 
-#### Option 1: Cron Job (Linux/Mac)
-Set up a cron job to run daily at 6 PM:
+#### Option 1: GitHub Actions (Recommended - Always On) ☁️
+
+Run automatically in the cloud, even when your computer is off!
+
+See **[GITHUB_ACTIONS_SETUP.md](GITHUB_ACTIONS_SETUP.md)** for complete setup instructions.
+
+Quick steps:
+1. Push code to GitHub (public or private repo)
+2. Add your email credentials as GitHub Secrets
+3. Enable GitHub Actions
+4. It runs daily at 6 PM automatically!
+
+**Benefits:**
+- ✅ Free for public repos
+- ✅ Runs even when your computer is off
+- ✅ No maintenance required
+- ✅ Secure (credentials encrypted)
+
+#### Option 2: Cron Job (Linux/Mac - Requires Computer On)
+Set up a cron job to run daily at 6 PM (requires your computer to be on):
 
 ```bash
 crontab -e
@@ -104,7 +122,7 @@ Add this line:
 0 18 * * * /usr/bin/python3 /path/to/surf_alert.py
 ```
 
-#### Option 2: Windows Task Scheduler
+#### Option 3: Windows Task Scheduler (Requires Computer On)
 1. Open Task Scheduler
 2. Create Basic Task
 3. Set trigger: Daily at 6:00 PM
