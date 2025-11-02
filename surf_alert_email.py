@@ -582,12 +582,23 @@ def main():
     print("=" * 80)
     print()
     
-    # Print formatted message
-    message = format_alert_message(alert_data)
-    print(message)
+    # Print formatted message only if there are alerts
+    if alert_data['alerts']:
+        message = format_alert_message(alert_data)
+        print(message)
+    else:
+        # Show summary without the misleading 0.00m message
+        print("📊 SUMMARY:")
+        print(f"   No surfable conditions found for tomorrow")
+        print(f"   All time slots scored below {MIN_QUALITY_SCORE}/100 threshold")
+        if all_scores:
+            max_score_in_day = max(s['quality_score'] for s in all_scores)
+            max_height_in_day = max(s['wave_height'] for s in all_scores)
+            print(f"   Best conditions: {max_height_in_day:.2f}m with score {max_score_in_day:.1f}/100")
     
     # Send email if alerts exist
     if alert_data['alerts'] and EMAIL_ENABLED:
+        message = format_alert_message(alert_data)
         subject = f"🏄 Med Surf Alert: {alert_data['max_quality']:.0f}/100 - {alert_data['max_wave_height']:.1f}m!"
         send_email_notification(subject, message)
     elif alert_data['alerts'] and not EMAIL_ENABLED:
