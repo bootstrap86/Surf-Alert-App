@@ -14,6 +14,73 @@ from config import (
     EMAIL_ENABLED, SMTP_SERVER, SMTP_PORT,
     SENDER_EMAIL, SENDER_PASSWORD, RECIPIENT_EMAIL
 )
+import math
+
+def calculate_sunrise_sunset(date, lat, lon):
+    """
+    Calculate sunrise and sunset times for a given date and location
+    Returns (sunrise_hour, sunset_hour) in 24h format as floats
+    """
+    # Julian day calculation
+    a = (14 - date.month) // 12
+    y = date.year + 4800 - a
+    m = date.month + 12 * a - 3
+    jdn = date.day + (153 * m + 2) // 5 + 365 * y + y // 4 - y // 100 + y // 400 - 32045
+    
+    # Number of days since Jan 1, 2000 12:00
+    n = jdn - 2451545.0
+    
+    # Mean solar time
+    J_star = n - lon / 360.0
+    
+    # Solar mean anomaly
+    M = (357.5291 + 0.98560028 * J_star) % 360
+    
+    # Equation of center
+    C = 1.9148 * math.sin(math.radians(M)) + 0.0200 * math.sin(math.radians(2 * M)) + 0.0003 * math.sin(math.radians(3 * M))
+    
+    # Ecliptic longitude
+    lambda_val = (M + C + 180 + 102.9372) % 360
+    
+    # Solar transit
+    J_transit = 2451545.0 + J_star + 0.0053 * math.sin(math.radians(M)) - 0.0069 * math.sin(math.radians(2 * lambda_val))
+    
+    # Declination of the sun
+    sin_delta = math.sin(math.radians(lambda_val)) * math.sin(math.radians(23.44))
+    cos_delta = math.cos(math.asin(sin_delta))
+    
+    # Hour angle
+    cos_omega = (math.sin(math.radians(-0.83)) - math.sin(math.radians(lat)) * sin_delta) / (math.cos(math.radians(lat)) * cos_delta)
+    
+    # Handle polar day/night
+    if cos_omega > 1:
+        return None, None  # Polar night
+    if cos_omega < -1:
+        return 0, 24  # Polar day
+    
+    omega = math.degrees(math.acos(cos_omega))
+    
+    # Sunrise and sunset in Julian days
+    J_rise = J_transit - omega / 360.0
+    J_set = J_transit + omega / 360.0
+    
+    # Convert to hours (UTC)
+    sunrise_utc = ((J_rise - jdn) * 24 + 12) % 24
+    sunset_utc = ((J_set - jdn) * 24 + 12) % 24
+    
+    # Convert to local time (assuming timezone is UTC+1 for Madrid winter)
+    # For proper timezone handling, we'd need pytz, but keeping it simple
+    timezone_offset = 1  # CET
+    sunrise_local = (sunrise_utc + timezone_offset) % 24
+    sunset_local = (sunset_utc + timezone_offset) % 24
+    
+    return sunrise_local, sunset_local
+
+def is_daylight(hour, sunrise, sunset):
+    """Check if given hour is during daylight"""
+    if sunrise is None or sunset is None:
+        return True  # If can't calculate, include all hours
+    return sunrise <= hour < sunset
 
 # ==================== MEDITERRANEAN SURF CONFIGURATION ====================
 # Minimum quality score (0-100) to trigger an alert
@@ -39,26 +106,25 @@ def degrees_to_compass(degrees):
 def score_wave_period(period):
     """
     Score wave period for MEDITERRANEAN conditions (0-100)
-    Med rarely sees 10s+ periods - adjust expectations!
-    3-6s is typical wind swell here
+    Short period = weak, choppy waves - be realistic!
     """
     if period is None or period == 'N/A':
-        return 40  # Unknown, assume mediocre
+        return 30  # Unknown, assume poor
     
     if period < 3:
-        return 20  # Very short, wind chop
+        return 10  # Useless chop
     elif period < 4:
-        return 50  # Short but common in Med - rideable!
+        return 30  # Very short, weak - hard to ride
     elif period < 5:
-        return 65  # Decent for Med
+        return 50  # Short but starting to work
     elif period < 6:
-        return 75  # Good for Med
+        return 70  # Decent for Med
     elif period < 7:
-        return 85  # Very good for Med
+        return 85  # Good for Med
     elif period < 9:
-        return 90  # Excellent for Med - rare!
+        return 92  # Very good for Med - rare!
     else:
-        return 95  # Epic for Med - very rare groundswell
+        return 97  # Epic for Med - very rare groundswell
 
 def score_wind_direction(wind_dir, wave_dir):
     """
@@ -159,12 +225,16 @@ def calculate_surf_quality(wave_height, wave_period, wave_direction, wind_speed,
     """
     Calculate overall surf quality for MEDITERRANEAN conditions (0-100)
     
-    Priority hierarchy:
-    1. Wave Height (35%) - Must have waves! Most important.
-    2. Wave Period (25%) - Determines power and cleanliness
-    3. Swell Direction (20%) - Does it hit the beach well?
-    4. Wind Direction (15%) - Clean vs choppy
-    5. Wind Speed (5%) - Fine-tuning for glassy conditions
+    Natural weighting - no artificial caps:
+    - Wave Period (45%) - MOST important: weak chop vs powerful waves
+    - Wave Height (30%) - Must have rideable size
+    - Swell Direction (15%) - Does it hit the beach?
+    - Wind Direction (7%) - Clean vs choppy
+    - Wind Speed (3%) - Glassy bonus
+    
+    With 45% weight, short period naturally kills the score:
+    - 0.6m @ 3.9s perfect conditions = ~45 points (weak)
+    - 1.0m @ 6s good conditions = ~80 points (good!)
     """
     # Calculate individual scores
     height_score = score_wave_height(wave_height)
@@ -173,50 +243,42 @@ def calculate_surf_quality(wave_height, wave_period, wave_direction, wind_speed,
     wind_speed_score = score_wind_speed(wind_speed)
     swell_dir_score = score_swell_direction(wave_direction)
     
-    # If waves are too small, cap the score
+    # Minimum viable waves
     if height_score < 30:
-        return height_score  # Nothing else matters if too small
+        return height_score  # Too small
     
-    # Weighted combination - HEIGHT IS KING
-    # Wave height (35%) - must have rideable waves!
-    # Period (25%) - power and wave quality  
-    # Swell direction (20%) - optimal angle for the beach
-    # Wind direction (15%) - offshore = clean, onshore = choppy
-    # Wind speed (5%) - glassy bonus
+    # Natural weighted combination - period dominates
     quality = (
-        height_score * 0.35 +
-        period_score * 0.25 +
-        swell_dir_score * 0.20 +
-        wind_dir_score * 0.15 +
-        wind_speed_score * 0.05
+        period_score * 0.45 +      # PERIOD IS KING - determines wave power
+        height_score * 0.30 +       # Size matters but period matters more
+        swell_dir_score * 0.15 +    # Direction
+        wind_dir_score * 0.07 +     # Wind direction
+        wind_speed_score * 0.03     # Wind speed
     )
     
-    # Synergy bonuses for ideal combinations
-    # Long period + good height = powerful, clean waves
+    # Synergy bonuses for truly good combos
     if wave_height is not None and wave_period is not None:
+        # Powerful waves: good period + good size
         if wave_period >= 6 and wave_height >= 0.8:
-            quality *= 1.15  # 15% bonus for powerful combo
-        elif wave_period >= 5 and wave_height >= 1.0:
-            quality *= 1.08  # 8% bonus
+            quality *= 1.10  # 10% bonus
+        elif wave_period >= 5.5 and wave_height >= 1.0:
+            quality *= 1.05  # 5% bonus
+        # Weak combo: short period + small size
+        elif wave_period < 4.5 and wave_height < 0.7:
+            quality *= 0.85  # 15% penalty
     
-    # Perfect direction + good size = extra bonus
-    if wave_height is not None and wave_height >= 0.8:
-        if 85 < wave_direction < 135:  # Perfect ESE angle
-            quality *= 1.05  # 5% bonus for optimal direction with size
-    
-    # Cap at 100
     return min(round(quality, 1), 100)
 
 def get_quality_rating(score):
     """Convert numeric score to text rating - adjusted for Med"""
     if score >= 80:
-        return "⭐⭐⭐⭐⭐ EPIC (for Med!)"
+        return "🔥🔥🔥🔥🔥 EPIC (for Med!)"
     elif score >= 70:
         return "⭐⭐⭐⭐ EXCELLENT"
     elif score >= 60:
-        return "⭐⭐⭐ GOOD"
+        return "✅✅✅ GOOD"
     elif score >= 50:
-        return "⭐⭐ FAIR - Worth checking"
+        return "👍👍 FAIR - Worth checking"
     elif score >= 40:
         return "⚠️ MARGINAL"
     else:
@@ -267,7 +329,7 @@ def get_surf_forecast():
         return None
 
 def analyze_forecast(data):
-    """Analyze forecast with Med-adapted quality scoring"""
+    """Analyze forecast with Med-adapted quality scoring - daylight hours only"""
     if not data or 'hourly' not in data:
         return None
     
@@ -281,6 +343,9 @@ def analyze_forecast(data):
     
     tomorrow = (datetime.now() + timedelta(days=1)).date()
     
+    # Calculate sunrise/sunset for tomorrow
+    sunrise, sunset = calculate_sunrise_sunset(tomorrow, LOCATION_LAT, LOCATION_LON)
+    
     alerts = []
     max_quality = 0
     max_wave_height = 0
@@ -289,6 +354,10 @@ def analyze_forecast(data):
         time_obj = datetime.fromisoformat(time_str)
         
         if time_obj.date() == tomorrow:
+            # Only include daylight hours
+            if not is_daylight(time_obj.hour, sunrise, sunset):
+                continue
+            
             wave_height = wave_heights[i]
             
             if wave_height is not None and wave_height >= SURF_THRESHOLD:
@@ -323,6 +392,8 @@ def analyze_forecast(data):
             'date': tomorrow.strftime('%Y-%m-%d'),
             'max_wave_height': max_wave_height,
             'max_quality': max_quality,
+            'sunrise': sunrise,
+            'sunset': sunset,
             'alerts': alerts
         }
     
@@ -333,13 +404,20 @@ def format_alert_message(alert_data):
     if not alert_data:
         return f"No quality surf alerts for tomorrow (minimum score: {MIN_QUALITY_SCORE}/100 for Med conditions)."
     
+    sunrise = alert_data.get('sunrise')
+    sunset = alert_data.get('sunset')
+    
+    sunrise_str = f"{int(sunrise):02d}:{int((sunrise % 1) * 60):02d}" if sunrise else "N/A"
+    sunset_str = f"{int(sunset):02d}:{int((sunset % 1) * 60):02d}" if sunset else "N/A"
+    
     message = f"""🏄 SURF ALERT for {alert_data['date']} 🏄
 Location: Vilassar de Mar / Montgat
 
+🌅 Sunrise: {sunrise_str} | Sunset: {sunset_str} 🌇
 Maximum Wave Height: {alert_data['max_wave_height']:.2f}m
 Peak Quality Score: {alert_data['max_quality']:.0f}/100 {get_quality_rating(alert_data['max_quality'])}
 
-Surfable windows (Med-adapted scoring):
+Surfable windows (daylight hours only):
 """
     
     for alert in alert_data['alerts']:
@@ -353,7 +431,7 @@ Surfable windows (Med-adapted scoring):
         message += f"\n   Wind: {wind_spd} from {wind_dir}"
         message += "\n"
     
-    message += f"\n💡 Optimized for Mediterranean conditions (short-period swells 3-6s typical)"
+    message += f"\n💡 Natural scoring (no caps): Period 45%, Height 30%, Direction 15%, Wind 10%"
     message += f"\n📊 Minimum quality: {MIN_QUALITY_SCORE}/100"
     return message
 
