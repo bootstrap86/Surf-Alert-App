@@ -347,6 +347,7 @@ def analyze_forecast(data):
     sunrise, sunset = calculate_sunrise_sunset(tomorrow, LOCATION_LAT, LOCATION_LON)
     
     alerts = []
+    all_scores = []  # Track all scores for logging
     max_quality = 0
     max_wave_height = 0
     
@@ -366,6 +367,13 @@ def analyze_forecast(data):
                 wind_spd = wind_speeds[i] if i < len(wind_speeds) else None
                 wind_dir = wind_directions[i] if i < len(wind_directions) else None
                 
+                # Calculate individual component scores for logging
+                height_score = score_wave_height(wave_height)
+                period_score = score_wave_period(wave_per)
+                swell_dir_score = score_swell_direction(wave_dir)
+                wind_dir_score = score_wind_direction(wind_dir, wave_dir)
+                wind_speed_score = score_wind_speed(wind_spd)
+                
                 # Calculate quality score
                 quality = calculate_surf_quality(
                     wave_height, wave_per, wave_dir, wind_spd, wind_dir
@@ -374,7 +382,26 @@ def analyze_forecast(data):
                 max_wave_height = max(max_wave_height, wave_height)
                 max_quality = max(max_quality, quality)
                 
-                # Only add if quality meets minimum threshold
+                # Store all scores for logging (even below threshold)
+                all_scores.append({
+                    'time': time_obj.strftime('%H:%M'),
+                    'wave_height': wave_height,
+                    'wave_period': wave_per,
+                    'wave_direction': wave_dir,
+                    'wind_speed': wind_spd,
+                    'wind_direction': wind_dir,
+                    'quality_score': quality,
+                    'quality_rating': get_quality_rating(quality),
+                    'breakdown': {
+                        'height_score': height_score,
+                        'period_score': period_score,
+                        'swell_dir_score': swell_dir_score,
+                        'wind_dir_score': wind_dir_score,
+                        'wind_speed_score': wind_speed_score
+                    }
+                })
+                
+                # Only add to alerts if quality meets minimum threshold
                 if quality >= MIN_QUALITY_SCORE:
                     alerts.append({
                         'time': time_obj.strftime('%H:%M'),
@@ -387,17 +414,18 @@ def analyze_forecast(data):
                         'quality_rating': get_quality_rating(quality)
                     })
     
-    if alerts:
-        return {
-            'date': tomorrow.strftime('%Y-%m-%d'),
-            'max_wave_height': max_wave_height,
-            'max_quality': max_quality,
-            'sunrise': sunrise,
-            'sunset': sunset,
-            'alerts': alerts
-        }
+    # Return data including all scores for logging
+    result = {
+        'date': tomorrow.strftime('%Y-%m-%d'),
+        'max_wave_height': max_wave_height,
+        'max_quality': max_quality,
+        'sunrise': sunrise,
+        'sunset': sunset,
+        'alerts': alerts,
+        'all_scores': all_scores  # Include all scores for detailed logging
+    }
     
-    return None
+    return result if alerts or all_scores else None
 
 def format_alert_message(alert_data):
     """Format the alert message with quality scores"""
@@ -472,14 +500,64 @@ def main():
     
     alert_data = analyze_forecast(forecast_data)
     
+    if not alert_data:
+        print("No surf data available for tomorrow (waves below threshold or outside daylight hours)")
+        return
+    
+    # Print detailed scoring breakdown for all time slots
+    print("=" * 80)
+    print("DETAILED SCORING BREAKDOWN (all daylight hours)")
+    print("=" * 80)
+    
+    all_scores = alert_data.get('all_scores', [])
+    if all_scores:
+        print(f"\nScoring formula: Period(45%) + Height(30%) + Direction(15%) + Wind Dir(7%) + Wind Spd(3%)\n")
+        
+        for score_data in all_scores:
+            breakdown = score_data['breakdown']
+            time = score_data['time']
+            quality = score_data['quality_score']
+            rating = score_data['quality_rating']
+            
+            wave_h = score_data['wave_height']
+            wave_p = score_data.get('wave_period', 'N/A')
+            wave_d = score_data.get('wave_direction', 'N/A')
+            wind_s = score_data.get('wind_speed', 'N/A')
+            wind_d = score_data.get('wind_direction', 'N/A')
+            
+            wave_p_str = f"{wave_p:.1f}s" if isinstance(wave_p, (int, float)) else wave_p
+            wave_d_str = f"{wave_d:.0f}°" if isinstance(wave_d, (int, float)) else wave_d
+            wind_s_str = f"{wind_s:.1f} km/h" if isinstance(wind_s, (int, float)) else wind_s
+            wind_d_str = f"{wind_d:.0f}°" if isinstance(wind_d, (int, float)) else wind_d
+            
+            meets_threshold = "✅ ALERT" if quality >= MIN_QUALITY_SCORE else "❌ Below threshold"
+            
+            print(f"{time} → Score: {quality:.1f}/100 {rating} {meets_threshold}")
+            print(f"  Conditions: {wave_h:.2f}m @ {wave_p_str} from {wave_d_str}, wind {wind_s_str} from {wind_d_str}")
+            print(f"  Calculation:")
+            print(f"    Period score:     {breakdown['period_score']:.0f}/100 × 45% = {breakdown['period_score'] * 0.45:.1f}")
+            print(f"    Height score:     {breakdown['height_score']:.0f}/100 × 30% = {breakdown['height_score'] * 0.30:.1f}")
+            print(f"    Direction score:  {breakdown['swell_dir_score']:.0f}/100 × 15% = {breakdown['swell_dir_score'] * 0.15:.1f}")
+            print(f"    Wind dir score:   {breakdown['wind_dir_score']:.0f}/100 × 7%  = {breakdown['wind_dir_score'] * 0.07:.1f}")
+            print(f"    Wind speed score: {breakdown['wind_speed_score']:.0f}/100 × 3%  = {breakdown['wind_speed_score'] * 0.03:.1f}")
+            print(f"    Total: {quality:.1f}/100")
+            print()
+    
+    print("=" * 80)
+    print()
+    
+    # Print formatted message
     message = format_alert_message(alert_data)
     print(message)
     
-    if alert_data and EMAIL_ENABLED:
+    # Send email if alerts exist
+    if alert_data['alerts'] and EMAIL_ENABLED:
         subject = f"🏄 Med Surf Alert: {alert_data['max_quality']:.0f}/100 - {alert_data['max_wave_height']:.1f}m!"
         send_email_notification(subject, message)
-    elif alert_data and not EMAIL_ENABLED:
+    elif alert_data['alerts'] and not EMAIL_ENABLED:
         print("\n📧 Email notifications disabled. Set EMAIL_ENABLED = True in config.py.")
+    elif not alert_data['alerts']:
+        print(f"\n📧 No email sent - all conditions scored below {MIN_QUALITY_SCORE}/100 threshold")
     
     return alert_data
 
