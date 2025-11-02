@@ -19,6 +19,7 @@ import math
 def calculate_sunrise_sunset(date, lat, lon):
     """
     Calculate sunrise and sunset times for a given date and location
+    Uses civil twilight (-6°) which is when there's enough light to surf
     Returns (sunrise_hour, sunset_hour) in 24h format as floats
     """
     # Julian day calculation
@@ -49,8 +50,8 @@ def calculate_sunrise_sunset(date, lat, lon):
     sin_delta = math.sin(math.radians(lambda_val)) * math.sin(math.radians(23.44))
     cos_delta = math.cos(math.asin(sin_delta))
     
-    # Hour angle
-    cos_omega = (math.sin(math.radians(-0.83)) - math.sin(math.radians(lat)) * sin_delta) / (math.cos(math.radians(lat)) * cos_delta)
+    # Hour angle - using -6° for civil twilight (enough light to see and surf)
+    cos_omega = (math.sin(math.radians(-6)) - math.sin(math.radians(lat)) * sin_delta) / (math.cos(math.radians(lat)) * cos_delta)
     
     # Handle polar day/night
     if cos_omega > 1:
@@ -68,9 +69,17 @@ def calculate_sunrise_sunset(date, lat, lon):
     sunrise_utc = ((J_rise - jdn) * 24 + 12) % 24
     sunset_utc = ((J_set - jdn) * 24 + 12) % 24
     
-    # Convert to local time (assuming timezone is UTC+1 for Madrid winter)
-    # For proper timezone handling, we'd need pytz, but keeping it simple
-    timezone_offset = 1  # CET
+    # Convert to local time
+    # Spain is UTC+1 (CET) in winter, UTC+2 (CEST) in summer
+    # Approximate DST: last Sunday of March to last Sunday of October
+    month = date.month
+    if 4 <= month <= 9:  # Roughly April to September
+        timezone_offset = 2  # CEST (summer)
+    elif month == 3 or month == 10:
+        timezone_offset = 1.5  # Transition months, use 1.5 as approximation
+    else:
+        timezone_offset = 1  # CET (winter)
+    
     sunrise_local = (sunrise_utc + timezone_offset) % 24
     sunset_local = (sunset_utc + timezone_offset) % 24
     
@@ -511,6 +520,14 @@ def main():
     print("=" * 80)
     print("DETAILED SCORING BREAKDOWN (all daylight hours)")
     print("=" * 80)
+    
+    # Display sunrise/sunset times
+    sunrise = alert_data.get('sunrise')
+    sunset = alert_data.get('sunset')
+    if sunrise and sunset:
+        sunrise_str = f"{int(sunrise):02d}:{int((sunrise % 1) * 60):02d}"
+        sunset_str = f"{int(sunset):02d}:{int((sunset % 1) * 60):02d}"
+        print(f"\n🌅 First Light: {sunrise_str} | Last Light: {sunset_str} 🌇")
     
     all_scores = alert_data.get('all_scores', [])
     if all_scores:
