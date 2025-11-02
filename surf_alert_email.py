@@ -272,13 +272,13 @@ def calculate_surf_quality(wave_height, wave_period, wave_direction, wind_speed,
 def get_quality_rating(score):
     """Convert numeric score to text rating - adjusted for Med"""
     if score >= 80:
-        return "🔥🔥🔥🔥🔥 EPIC (for Med!)"
+        return "🔥 EPIC (for Med!)"
     elif score >= 70:
-        return "⭐⭐⭐⭐ EXCELLENT"
+        return "⭐ EXCELLENT"
     elif score >= 60:
-        return "✅✅✅ GOOD"
+        return "✅ GOOD"
     elif score >= 50:
-        return "👍👍 FAIR - Worth checking"
+        return "👍 FAIR - Worth checking"
     elif score >= 40:
         return "⚠️ MARGINAL"
     else:
