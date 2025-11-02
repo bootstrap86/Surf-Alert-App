@@ -1,0 +1,35 @@
+name: Daily Surf Alert
+
+on:
+  schedule:
+    # Run every day at 6:00 PM Madrid time (18:00 CET = 17:00 UTC in winter, 16:00 UTC in summer)
+    # Adjust to your preferred time
+    - cron: '0 17 * * *'  # 5:00 PM UTC = 6:00 PM CET (winter)
+  
+  workflow_dispatch:  # Allows manual triggering from GitHub UI
+
+jobs:
+  check-surf:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+    
+    - name: Run surf alert
+      env:
+        SURF_ALERT_EMAIL: ${{ secrets.SURF_ALERT_EMAIL }}
+        SURF_ALERT_PASSWORD: ${{ secrets.SURF_ALERT_PASSWORD }}
+        SURF_ALERT_RECIPIENT: ${{ secrets.SURF_ALERT_RECIPIENT }}
+      run: |
+        python surf_alert_email.py
