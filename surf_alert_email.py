@@ -360,13 +360,13 @@ def analyze_forecast(data):
                 continue
             
             wave_height = wave_heights[i]
+            wave_dir = wave_directions[i] if i < len(wave_directions) else None
+            wave_per = wave_periods[i] if i < len(wave_periods) else None
+            wind_spd = wind_speeds[i] if i < len(wind_speeds) else None
+            wind_dir = wind_directions[i] if i < len(wind_directions) else None
             
-            if wave_height is not None and wave_height >= SURF_THRESHOLD:
-                wave_dir = wave_directions[i] if i < len(wave_directions) else None
-                wave_per = wave_periods[i] if i < len(wave_periods) else None
-                wind_spd = wind_speeds[i] if i < len(wind_speeds) else None
-                wind_dir = wind_directions[i] if i < len(wind_directions) else None
-                
+            # Log ALL daylight hours, even if wave height is below threshold or None
+            if wave_height is not None:
                 # Calculate individual component scores for logging
                 height_score = score_wave_height(wave_height)
                 period_score = score_wave_period(wave_per)
@@ -379,10 +379,12 @@ def analyze_forecast(data):
                     wave_height, wave_per, wave_dir, wind_spd, wind_dir
                 )
                 
-                max_wave_height = max(max_wave_height, wave_height)
-                max_quality = max(max_quality, quality)
+                # Track max values only for waves above threshold
+                if wave_height >= SURF_THRESHOLD:
+                    max_wave_height = max(max_wave_height, wave_height)
+                    max_quality = max(max_quality, quality)
                 
-                # Store all scores for logging (even below threshold)
+                # Store ALL scores for logging (even below wave height threshold)
                 all_scores.append({
                     'time': time_obj.strftime('%H:%M'),
                     'wave_height': wave_height,
@@ -398,11 +400,12 @@ def analyze_forecast(data):
                         'swell_dir_score': swell_dir_score,
                         'wind_dir_score': wind_dir_score,
                         'wind_speed_score': wind_speed_score
-                    }
+                    },
+                    'above_wave_threshold': wave_height >= SURF_THRESHOLD
                 })
                 
-                # Only add to alerts if quality meets minimum threshold
-                if quality >= MIN_QUALITY_SCORE:
+                # Only add to alerts if meets BOTH thresholds
+                if wave_height >= SURF_THRESHOLD and quality >= MIN_QUALITY_SCORE:
                     alerts.append({
                         'time': time_obj.strftime('%H:%M'),
                         'wave_height': wave_height,
@@ -530,9 +533,13 @@ def main():
             wind_s_str = f"{wind_s:.1f} km/h" if isinstance(wind_s, (int, float)) else wind_s
             wind_d_str = f"{wind_d:.0f}°" if isinstance(wind_d, (int, float)) else wind_d
             
-            meets_threshold = "✅ ALERT" if quality >= MIN_QUALITY_SCORE else "❌ Below threshold"
+            # Show both thresholds
+            above_wave_threshold = score_data.get('above_wave_threshold', False)
+            wave_status = "✅ Above 0.5m" if above_wave_threshold else "❌ Below 0.5m"
+            quality_status = "✅ ALERT" if quality >= MIN_QUALITY_SCORE else "❌ Below quality threshold"
             
-            print(f"{time} → Score: {quality:.1f}/100 {rating} {meets_threshold}")
+            print(f"{time} → Score: {quality:.1f}/100 {rating}")
+            print(f"  {wave_status} | {quality_status}")
             print(f"  Conditions: {wave_h:.2f}m @ {wave_p_str} from {wave_d_str}, wind {wind_s_str} from {wind_d_str}")
             print(f"  Calculation:")
             print(f"    Period score:     {breakdown['period_score']:.0f}/100 × 45% = {breakdown['period_score'] * 0.45:.1f}")
