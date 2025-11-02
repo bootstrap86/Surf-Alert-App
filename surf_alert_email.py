@@ -211,24 +211,36 @@ def score_swell_direction(wave_dir):
 def score_wave_height(height):
     """
     Score wave height (0-100)
-    This is now a PRIMARY factor, not just a bonus
+    Gradual, smooth progression - no big jumps
     """
     if height is None or height < 0.2:
         return 0  # Too small to surf
+    elif height < 0.3:
+        return 20  # Tiny, barely visible
     elif height < 0.4:
-        return 30  # Barely rideable, small fun
+        return 35  # Very small
+    elif height < 0.5:
+        return 45  # Small but might catch something
     elif height < 0.6:
-        return 60  # Small but fun
+        return 55  # Small fun waves
+    elif height < 0.7:
+        return 65  # Getting rideable
+    elif height < 0.8:
+        return 72  # Decent
     elif height < 0.9:
-        return 80  # Good size for Med
+        return 78  # Good size for Med
+    elif height < 1.0:
+        return 83  # Great size
     elif height < 1.2:
-        return 90  # Great size
-    elif height < 1.8:
-        return 95  # Excellent, pumping!
+        return 88  # Very good
+    elif height < 1.5:
+        return 92  # Excellent, pumping!
+    elif height < 2.0:
+        return 95  # Big and good
     elif height < 2.5:
-        return 90  # Big but still good
+        return 92  # Getting big, harder
     else:
-        return 70  # Too big/dangerous for most
+        return 85  # Too big/dangerous for most
 
 def calculate_surf_quality(wave_height, wave_period, wave_direction, wind_speed, wind_direction):
     """
