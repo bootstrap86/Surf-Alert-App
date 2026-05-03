@@ -18,7 +18,7 @@ except ImportError:
 
 # ==================== SURF SETTINGS ====================
 # Wave height threshold in meters - you'll get alerts when waves exceed this
-SURF_THRESHOLD = 0.9
+SURF_THRESHOLD = 0.8
 
 # Location coordinates for Vilassar de Mar / Montgat
 LOCATION_LAT = 41.5089
