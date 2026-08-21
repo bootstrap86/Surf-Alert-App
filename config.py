@@ -21,8 +21,8 @@ except ImportError:
 SURF_THRESHOLD = 0.8
 
 # Location coordinates for Vilassar de Mar / Montgat
-LOCATION_LAT = 41.5089
-LOCATION_LON = 2.3944
+LOCATION_LAT = 41.4958022
+LOCATION_LON = 2.3810150
 
 # ==================== EMAIL SETTINGS ====================
 # Set to True to enable email notifications
