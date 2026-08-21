@@ -28,6 +28,8 @@ sessions before trusting this fully; see notes at bottom of file.
 """
 
 import requests
+import argparse
+from collections import defaultdict
 from datetime import datetime, timedelta
 import smtplib
 from email.mime.text import MIMEText
@@ -224,19 +226,29 @@ def calculate_surf_quality(wave_height, wave_period, wave_direction, wind_speed,
     return min(round(quality, 1), 100)
 
 def get_quality_rating(score):
-    if score >= 90: return "🔥 EPIC"
-    elif score >= 79: return "⭐ EXCELLENT"
-    elif score >= 69: return "✅ GOOD"
-    elif score >= 55: return "⚠️ MARGINAL"
-    else: return "❌ POOR"
+    """PATCHED: rebuilt against the 11-session log, not just re-scaled.
+    Sharpest signal in the whole log: every session you skipped scored
+    below 69.3, every session you actually surfed scored 69.3 or higher,
+    no overlap. That number, not a round 50 or 70, is the real line
+    between "worth going" and "not," so it anchors the GOOD boundary
+    below. Bands above that are softer, based on how good the "went"
+    sessions actually were (69-78 = solid but sometimes inconsistent,
+    "few peaks, long waits"; 79+ = your best logged days)."""
+    if score >= 90: return "🔥 EPIC - nothing in your log has hit this yet"
+    elif score >= 79: return "⭐ EXCELLENT - one of your better days"
+    elif score >= 69: return "✅ GOOD - worth going, can still be inconsistent"
+    elif score >= 55: return "⚠️ MARGINAL - you've skipped every session in this range so far"
+    else: return "❌ POOR - skip it"
 
-def get_surf_forecast():
+def get_surf_forecast(forecast_days=3):
+    """forecast_days=3 for the daily check (tomorrow, with a little
+    buffer). Weekly digest calls this with forecast_days=7."""
     try:
         url = "https://marine-api.open-meteo.com/v1/marine"
         params = {
             'latitude': LOCATION_LAT, 'longitude': LOCATION_LON,
             'hourly': 'wave_height,wave_direction,wave_period,wind_wave_height,wind_wave_direction,wind_wave_period',
-            'timezone': 'Europe/Madrid', 'forecast_days': 3
+            'timezone': 'Europe/Madrid', 'forecast_days': forecast_days
         }
         response = requests.get(url, params=params, timeout=10)
         response.raise_for_status()
@@ -246,7 +258,7 @@ def get_surf_forecast():
         weather_params = {
             'latitude': LOCATION_LAT, 'longitude': LOCATION_LON,
             'hourly': 'wind_speed_10m,wind_direction_10m',
-            'timezone': 'Europe/Madrid', 'forecast_days': 3
+            'timezone': 'Europe/Madrid', 'forecast_days': forecast_days
         }
         try:
             wind_response = requests.get(weather_url, params=weather_params, timeout=10)
@@ -386,6 +398,124 @@ def send_email_notification(subject, message):
     except Exception as e:
         print(f"❌ Failed to send email: {e}")
 
+def analyze_weekly_forecast(data, days_ahead=7):
+    """Groups the forecast by calendar day (starting tomorrow) and finds
+    the single best daylight window per day, using the same
+    calculate_surf_quality as the daily check. This is what the weekly
+    digest is built from."""
+    if not data or 'hourly' not in data:
+        return []
+
+    hourly = data['hourly']
+    times = hourly['time']
+    wave_heights = hourly['wave_height']
+    wave_directions = hourly.get('wave_direction', [None] * len(times))
+    wave_periods = hourly.get('wave_period', [None] * len(times))
+    wind_speeds = hourly.get('wind_speed_10m', [None] * len(times))
+    wind_directions = hourly.get('wind_direction_10m', [None] * len(times))
+
+    today = datetime.now().date()
+    window_end = today + timedelta(days=days_ahead)
+
+    by_date = defaultdict(list)
+    for i, time_str in enumerate(times):
+        time_obj = datetime.fromisoformat(time_str)
+        d = time_obj.date()
+        if d <= today or d > window_end:
+            continue
+
+        sunrise, sunset = calculate_sunrise_sunset(d, LOCATION_LAT, LOCATION_LON)
+        if not is_daylight(time_obj.hour, sunrise, sunset):
+            continue
+
+        wave_height = wave_heights[i]
+        if wave_height is None:
+            continue
+        wave_dir = wave_directions[i] if i < len(wave_directions) else None
+        wave_per = wave_periods[i] if i < len(wave_periods) else None
+        wind_spd = wind_speeds[i] if i < len(wind_speeds) else None
+        wind_dir = wind_directions[i] if i < len(wind_directions) else None
+
+        quality = calculate_surf_quality(wave_height, wave_per, wave_dir, wind_spd, wind_dir)
+        by_date[d].append({
+            'time': time_obj.strftime('%H:%M'),
+            'wave_height': wave_height, 'wave_period': wave_per,
+            'wave_direction': wave_dir, 'wind_speed': wind_spd,
+            'wind_direction': wind_dir, 'quality_score': quality,
+        })
+
+    daily_summaries = []
+    for d in sorted(by_date.keys()):
+        entries = by_date[d]
+        best = max(entries, key=lambda e: e['quality_score'])
+        daily_summaries.append({'date': d, 'best': best, 'rating': get_quality_rating(best['quality_score'])})
+    return daily_summaries
+
+def format_weekly_message(daily_summaries):
+    if not daily_summaries:
+        return ("🌊 WEEKLY SURF OUTLOOK — Vilassar de Mar / Montgat 🌊\n\n"
+                "No forecast data came back this week, that's worth checking on"
+                " if it happens more than once, it may mean the API or the"
+                " script itself broke rather than the sea just being flat.")
+
+    best_of_week = max(daily_summaries, key=lambda d: d['best']['quality_score'])
+
+    lines = ["🌊 WEEKLY SURF OUTLOOK — Vilassar de Mar / Montgat 🌊", "",
+             "Best window each day (daylight hours only):", ""]
+
+    for day in daily_summaries:
+        b = day['best']
+        date_str = day['date'].strftime('%a %d %b')
+        wave_dir_str = (f"{b['wave_direction']:.0f}° ({degrees_to_compass(b['wave_direction'])})"
+                         if isinstance(b['wave_direction'], (int, float)) else 'N/A')
+        wind_dir_str = (f"{b['wind_direction']:.0f}° ({degrees_to_compass(b['wind_direction'])})"
+                         if isinstance(b['wind_direction'], (int, float)) else 'N/A')
+        marker = "  👈 BEST DAY" if day is best_of_week else ""
+        lines.append(f"{date_str}: {b['quality_score']:.0f}/100 {day['rating']}{marker}")
+        lines.append(f"   Best around {b['time']}: {b['wave_height']:.2f}m @ {b['wave_period']:.1f}s "
+                      f"from {wave_dir_str}, wind {b['wind_speed']:.1f} km/h from {wind_dir_str}")
+        lines.append("")
+
+    lines.append(f"💡 The daily alert fires automatically once a day clears {SURF_THRESHOLD}m "
+                 f"and {MIN_QUALITY_SCORE}/100, watch your inbox around the best day(s) above.")
+    lines.append("📉 Forecast accuracy drops noticeably past 3-4 days out, treat the back half "
+                 "of the week as a rough heads-up, not a commitment.")
+    return "\n".join(lines)
+
+def send_weekly_summary():
+    print("Fetching weekly surf outlook...")
+    forecast_data = get_surf_forecast(forecast_days=7)
+
+    if forecast_data is None:
+        print("Failed to retrieve weekly forecast data")
+        if EMAIL_ENABLED:
+            send_email_notification(
+                "🌊 Weekly Surf Check Failed",
+                "Could not fetch this week's forecast. Worth checking the script or the API, "
+                "this email exists so a broken script doesn't look identical to a flat week."
+            )
+        return
+
+    daily_summaries = analyze_weekly_forecast(forecast_data, days_ahead=7)
+    message = format_weekly_message(daily_summaries)
+    print(message)
+
+    if not EMAIL_ENABLED:
+        print("\n📧 Email notifications disabled. Set EMAIL_ENABLED = True in config.py.")
+        return
+
+    if daily_summaries:
+        best = max(daily_summaries, key=lambda d: d['best']['quality_score'])
+        subject = (f"🌊 Weekly Surf Outlook: best day {best['date'].strftime('%a')} "
+                   f"— {best['best']['quality_score']:.0f}/100 {get_quality_rating(best['best']['quality_score'])}")
+    else:
+        subject = "🌊 Weekly Surf Outlook: no data this week"
+    send_email_notification(subject, message)
+
+def main_weekly():
+    print("Checking weekly Mediterranean surf outlook for Vilassar de Mar / Montgat...\n")
+    send_weekly_summary()
+
 def main():
     print("Checking Mediterranean surf conditions for Vilassar de Mar / Montgat...")
     print(f"Wave threshold: {SURF_THRESHOLD}m")
@@ -422,7 +552,15 @@ def main():
     return alert_data
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Med Surf Alert")
+    parser.add_argument('--weekly', action='store_true',
+                         help='Send the weekly outlook digest instead of the daily check')
+    args = parser.parse_args()
+
+    if args.weekly:
+        main_weekly()
+    else:
+        main()
 
 # ── NOTES FROM 11-SESSION LOG ANALYSIS ──────────────────────────────────
 # Before this patch: mean absolute error vs your logged scores was 16.2,
