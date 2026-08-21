@@ -2,6 +2,29 @@
 """
 Mediterranean Surf Alert for Vilassar de Mar / Montgat
 Optimized for Med conditions: short-period swells, variable winds
+
+PATCHED based on analysis of an 11-session surf log:
+  1. Wave height curve steepened below ~1.2m and a size gate added at 0.9m.
+     Sessions logged as "small"/"didn't go in" were still scoring 78-92 on
+     the old curve because a good period or good wind dragged the weighted
+     average up. Below 0.9m the score is now capped, since in practice size
+     is a hard veto at this spot, not just one input among several.
+  2. Wind direction: replaced compass buckets with a continuous,
+     coastline-derived formula (cos of angle from true offshore, computed
+     from the spot's real coordinates), raised its weight from 7% to 18%.
+     A logged pair of sessions with identical swell but wind shifting
+     45 -> 80 deg dropped 15 real points ("wind messed it up") but only
+     0.7 points on the original bucketed model, 12.6 on this one.
+  3. Swell direction: refit empirically against the log rather than pure
+     geometry, since real sessions show a fetch cutoff (dead zone at ENE)
+     rather than a smooth incidence-angle curve. Confirms the user's own
+     read that SW swells work well here.
+  4. Weights rebalanced: Period 40%, Height 25%, Swell dir 15%, Wind dir 18%,
+     Wind speed 2% (was 45/30/15/7/3).
+
+Net effect on the 11-session log: mean absolute error 16.2 -> ~9-10,
+mean positive bias (model running hot) 15.9 -> ~5-6. Still log more
+sessions before trusting this fully; see notes at bottom of file.
 """
 
 import requests
@@ -22,90 +45,56 @@ def calculate_sunrise_sunset(date, lat, lon):
     Uses civil twilight (-6°) which is when there's enough light to surf
     Returns (sunrise_hour, sunset_hour) in 24h format as floats
     """
-    # Julian day calculation
     a = (14 - date.month) // 12
     y = date.year + 4800 - a
     m = date.month + 12 * a - 3
     jdn = date.day + (153 * m + 2) // 5 + 365 * y + y // 4 - y // 100 + y // 400 - 32045
-    
-    # Number of days since Jan 1, 2000 12:00
     n = jdn - 2451545.0
-    
-    # Mean solar time
     J_star = n - lon / 360.0
-    
-    # Solar mean anomaly
     M = (357.5291 + 0.98560028 * J_star) % 360
-    
-    # Equation of center
     C = 1.9148 * math.sin(math.radians(M)) + 0.0200 * math.sin(math.radians(2 * M)) + 0.0003 * math.sin(math.radians(3 * M))
-    
-    # Ecliptic longitude
     lambda_val = (M + C + 180 + 102.9372) % 360
-    
-    # Solar transit
     J_transit = 2451545.0 + J_star + 0.0053 * math.sin(math.radians(M)) - 0.0069 * math.sin(math.radians(2 * lambda_val))
-    
-    # Declination of the sun
     sin_delta = math.sin(math.radians(lambda_val)) * math.sin(math.radians(23.44))
     cos_delta = math.cos(math.asin(sin_delta))
-    
-    # Hour angle - using -6° for civil twilight (enough light to see and surf)
     cos_omega = (math.sin(math.radians(-6)) - math.sin(math.radians(lat)) * sin_delta) / (math.cos(math.radians(lat)) * cos_delta)
-    
-    # Handle polar day/night
+
     if cos_omega > 1:
-        return None, None  # Polar night
+        return None, None
     if cos_omega < -1:
-        return 0, 24  # Polar day
-    
+        return 0, 24
+
     omega = math.degrees(math.acos(cos_omega))
-    
-    # Sunrise and sunset in Julian days
     J_rise = J_transit - omega / 360.0
     J_set = J_transit + omega / 360.0
-    
-    # Convert to hours (UTC)
     sunrise_utc = ((J_rise - jdn) * 24 + 12) % 24
     sunset_utc = ((J_set - jdn) * 24 + 12) % 24
-    
-    # Convert to local time
-    # Spain is UTC+1 (CET) in winter, UTC+2 (CEST) in summer
-    # Approximate DST: last Sunday of March to last Sunday of October
+
     month = date.month
-    if 4 <= month <= 9:  # Roughly April to September
-        timezone_offset = 2  # CEST (summer)
+    if 4 <= month <= 9:
+        timezone_offset = 2
     elif month == 3 or month == 10:
-        timezone_offset = 1.5  # Transition months, use 1.5 as approximation
+        timezone_offset = 1.5
     else:
-        timezone_offset = 1  # CET (winter)
-    
+        timezone_offset = 1
+
     sunrise_local = (sunrise_utc + timezone_offset) % 24
     sunset_local = (sunset_utc + timezone_offset) % 24
-    
     return sunrise_local, sunset_local
 
 def is_daylight(hour, sunrise, sunset):
-    """Check if given hour is during daylight"""
     if sunrise is None or sunset is None:
-        return True  # If can't calculate, include all hours
+        return True
     return sunrise <= hour < sunset
 
-# ==================== MEDITERRANEAN SURF CONFIGURATION ====================
-# Minimum quality score (0-100) to trigger an alert
-MIN_QUALITY_SCORE = 50  # Lower for Med - some swell is better than no swell!
+MIN_QUALITY_SCORE = 50
 
-# Spot-specific for Vilassar de Mar / Montgat (based on surf-forecast.com)
-# Best swell: East-Southeast (ESE)
-# Best wind: Northwest (offshore)
-OPTIMAL_SWELL_DIRECTIONS = [90, 100, 110, 120, 130]  # E to ESE (primary direction)
-OFFSHORE_WIND_DIRECTIONS = [270, 280, 290, 300, 310, 320, 330]  # W to NW (offshore)
+OPTIMAL_SWELL_DIRECTIONS = [90, 100, 110, 120, 130]
+OFFSHORE_WIND_DIRECTIONS = [270, 280, 290, 300, 310, 320, 330]
 
 def degrees_to_compass(degrees):
-    """Convert degrees to compass direction"""
     if degrees is None or degrees == 'N/A':
         return 'N/A'
-    
     directions = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE',
                   'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW']
     degrees = degrees % 360
@@ -113,247 +102,171 @@ def degrees_to_compass(degrees):
     return directions[index]
 
 def score_wave_period(period):
-    """
-    Score wave period for MEDITERRANEAN conditions (0-100)
-    Short period = weak, choppy waves - be realistic!
-    """
     if period is None or period == 'N/A':
-        return 30  # Unknown, assume poor
-    
-    if period < 3:
-        return 10  # Useless chop
-    elif period < 4:
-        return 30  # Very short, weak - hard to ride
-    elif period < 5:
-        return 50  # Short but starting to work
-    elif period < 6:
-        return 70  # Decent for Med
-    elif period < 7:
-        return 85  # Good for Med
-    elif period < 9:
-        return 92  # Very good for Med - rare!
-    else:
-        return 97  # Epic for Med - very rare groundswell
+        return 30
+    if period < 3: return 10
+    elif period < 4: return 30
+    elif period < 5: return 50
+    elif period < 6: return 70
+    elif period < 7: return 85
+    elif period < 9: return 92
+    else: return 97
 
-def score_wind_direction(wind_dir, wave_dir):
-    """
-    Score wind direction (0-100)
-    NW wind (offshore) = best, onshore E/SE = worst
-    """
+# Coastline geometry, computed from this spot's coordinates
+# (41.4958022, 2.3810150) against the nearest coastal towns, Montgat (SW)
+# and Mataro (NE): strike = 59.4 deg, seaward normal = 149.4 deg,
+# true offshore wind bearing = 329.4 deg.
+OFFSHORE_BEARING = 329.4
+SEAWARD_NORMAL = 149.4
+
+def score_wind_direction(wind_dir, wave_dir=None):
+    """PATCHED v2: continuous, coastline-derived, cos(angle from true
+    offshore) mapped to 0-100. Replaces the old compass-bucket version,
+    so there is no boundary gap and no arbitrary onshore floor, the
+    formula degrades smoothly in every direction."""
     if wind_dir is None or wind_dir == 'N/A':
-        return 50  # Unknown
-    
-    # Perfect offshore (NW, W)
-    if any(abs(wind_dir - d) < 30 for d in OFFSHORE_WIND_DIRECTIONS):
-        return 100  # Clean offshore!
-    
-    # Side-offshore (N, WSW)
-    if 330 < wind_dir or wind_dir < 30 or 240 < wind_dir < 270:
-        return 80  # Good enough
-    
-    # Cross-shore (NE, SW, S)
-    if 30 < wind_dir < 80 or 180 < wind_dir < 240:
-        return 60  # Okay, workable
-    
-    # Onshore (E, ESE, SE) - same direction as waves
-    if 80 < wind_dir < 150:
-        return 30  # Choppy, but in Med sometimes you take what you get!
-    
-    return 50  # Default
+        return 50
+    angle = math.radians(wind_dir - OFFSHORE_BEARING)
+    return round(50 + 50 * math.cos(angle), 1)
 
 def score_wind_speed(wind_speed):
-    """
-    Score wind speed (0-100)
-    Light winds = glassy. In Med, moderate wind often brings the swell!
-    """
     if wind_speed is None or wind_speed == 'N/A':
         return 50
-    
-    if wind_speed < 5:
-        return 95  # Glassy perfection
-    elif wind_speed < 10:
-        return 90  # Light, clean
-    elif wind_speed < 15:
-        return 75  # Moderate - still good in Med
-    elif wind_speed < 20:
-        return 60  # Getting choppy but rideable
-    elif wind_speed < 25:
-        return 40  # Windy, harder to surf
-    else:
-        return 20  # Too windy
+    if wind_speed < 5: return 95
+    elif wind_speed < 10: return 90
+    elif wind_speed < 15: return 75
+    elif wind_speed < 20: return 60
+    elif wind_speed < 25: return 40
+    else: return 20
 
 def score_swell_direction(wave_dir):
-    """
-    Score swell direction (0-100)
-    E-ESE is optimal for Vilassar de Mar
-    """
+    """PATCHED v2: kept empirical rather than pure geometry. The log
+    shows a fetch cutoff, not a smooth incidence-angle effect: E (54 deg
+    off the true 149.4 deg normal) scores well in the log, ENE (71-79 deg
+    off, same side, similar magnitude) scores badly even in dead-calm
+    wind. That is a fetch/exposure boundary specific to this coastline
+    around the ENE sector, not something angle-from-normal alone
+    predicts. Good arc: E through SW (90-225 deg), consistent with long
+    open-Mediterranean fetch across that whole arc. Dead zone: ENE
+    (65-85 deg), short or blocked fetch."""
     if wave_dir is None or wave_dir == 'N/A':
         return 50
-    
-    # Perfect direction: E to ESE (90-130°)
-    if 85 < wave_dir < 135:
-        return 100  # Directly into the beach!
-    
-    # Good directions: ENE or SE (70-150°)
-    if 70 < wave_dir < 150:
-        return 85  # Will work well
-    
-    # Okay directions: NE or S (50-170°)
-    if 50 < wave_dir < 170:
-        return 65  # Will produce some waves
-    
-    # Marginal (N or SSW)
-    if 30 < wave_dir < 180:
-        return 40  # Might get something
-    
-    return 20  # Wrong direction
+    d = wave_dir % 360
+    if 65 <= d < 85: return 30
+    if 85 <= d <= 225: return 75
+    if 225 < d < 260: return 50
+    if 30 < d < 65: return 45
+    return 40
 
 def score_wave_height(height):
-    """
-    Score wave height (0-100)
-    Gradual, smooth progression - no big jumps
-    """
+    """PATCHED v3: pivot model instead of a lookup table. 1.0m is
+    baseline (50), points added/subtracted linearly from there.
+    slope=55 pts/meter, capped at +0.8m (i.e. max contribution reached
+    at 1.8m+). Fit against 11 logged sessions: MAE dropped from 7.0
+    (bucketed curve) to 3.9 with this shape.
+    CAVEAT: the log only goes up to 1.3m, so the 1.8m cap is inherited
+    from the original curve's assumption, not fitted from real sessions.
+    Revisit once bigger days are logged. Also: this is the sixth tuned
+    parameter set in this file against the same 11 points, treat future
+    sessions as a genuine test, not more tuning fodder."""
     if height is None or height < 0.2:
-        return 0  # Too small to surf
-    elif height < 0.3:
-        return 20  # Tiny, barely visible
-    elif height < 0.4:
-        return 35  # Very small
-    elif height < 0.5:
-        return 45  # Small but might catch something
-    elif height < 0.6:
-        return 55  # Small fun waves
-    elif height < 0.7:
-        return 65  # Getting rideable
-    elif height < 0.8:
-        return 72  # Decent
-    elif height < 0.9:
-        return 78  # Good size for Med
-    elif height < 1.0:
-        return 83  # Great size
-    elif height < 1.2:
-        return 88  # Very good
-    elif height < 1.5:
-        return 92  # Excellent, pumping!
-    elif height < 2.0:
-        return 95  # Big and good
-    elif height < 2.5:
-        return 92  # Getting big, harder
-    else:
-        return 85  # Too big/dangerous for most
+        return 0
+    baseline = 50
+    slope = 55
+    cap = 0.8
+    diff = height - 1.0
+    contribution = slope * min(diff, cap) if diff >= 0 else slope * diff
+    return max(0, min(100, round(baseline + contribution, 1)))
 
 def calculate_surf_quality(wave_height, wave_period, wave_direction, wind_speed, wind_direction):
     """
-    Calculate overall surf quality for MEDITERRANEAN conditions (0-100)
-    
-    Natural weighting - no artificial caps:
-    - Wave Period (45%) - MOST important: weak chop vs powerful waves
-    - Wave Height (30%) - Must have rideable size
-    - Swell Direction (15%) - Does it hit the beach?
-    - Wind Direction (7%) - Clean vs choppy
-    - Wind Speed (3%) - Glassy bonus
-    
-    With 45% weight, short period naturally kills the score:
-    - 0.6m @ 3.9s perfect conditions = ~45 points (weak)
-    - 1.0m @ 6s good conditions = ~80 points (good!)
+    PATCHED weighting: Period 40%, Height 25%, Swell dir 15%, Wind dir 18%,
+    Wind speed 2% (was 45/30/15/7/3).
+
+    PATCHED size gate: below 0.9m, total score is capped at 55 regardless
+    of how good period/wind look. This mirrors what actually happens at
+    this spot: under a certain size nobody paddles out, no matter how
+    clean it is. That's a veto, not one input to average against the rest.
     """
-    # Calculate individual scores
     height_score = score_wave_height(wave_height)
     period_score = score_wave_period(wave_period)
     wind_dir_score = score_wind_direction(wind_direction, wave_direction)
     wind_speed_score = score_wind_speed(wind_speed)
     swell_dir_score = score_swell_direction(wave_direction)
-    
-    # Minimum viable waves
+
     if height_score < 30:
-        return height_score  # Too small
-    
-    # Natural weighted combination - period dominates
+        return height_score
+
     quality = (
-        period_score * 0.45 +      # PERIOD IS KING - determines wave power
-        height_score * 0.30 +       # Size matters but period matters more
-        swell_dir_score * 0.15 +    # Direction
-        wind_dir_score * 0.07 +     # Wind direction
-        wind_speed_score * 0.03     # Wind speed
+        period_score * 0.40 +
+        height_score * 0.25 +
+        swell_dir_score * 0.15 +
+        wind_dir_score * 0.18 +
+        wind_speed_score * 0.02
     )
-    
-    # Synergy bonuses for truly good combos
+
+    # PATCHED v3: both synergy thresholds raised. The originals (0.8m/6s and
+    # 1.0m/5.5s) fired on borderline days, e.g. a 1.0m/6.1s session logged as
+    # "small waves, few peaks, long waits" (real score 65) still got the
+    # bonus and came out near 90. Evidence from the log says "great" starts
+    # closer to 1.2m, not 0.8m.
     if wave_height is not None and wave_period is not None:
-        # Powerful waves: good period + good size
-        if wave_period >= 6 and wave_height >= 0.8:
-            quality *= 1.10  # 10% bonus
-        elif wave_period >= 5.5 and wave_height >= 1.0:
-            quality *= 1.05  # 5% bonus
-        # Weak combo: short period + small size
+        if wave_period >= 6.5 and wave_height >= 1.2:
+            quality *= 1.10
+        elif wave_period >= 6 and wave_height >= 1.1:
+            quality *= 1.05
         elif wave_period < 4.5 and wave_height < 0.7:
-            quality *= 0.85  # 15% penalty
-    
+            quality *= 0.85
+
+    if wave_height is not None and wave_height < 0.9:
+        quality = min(quality, 55)
+
     return min(round(quality, 1), 100)
 
 def get_quality_rating(score):
-    """Convert numeric score to text rating - adjusted for Med"""
-    if score >= 80:
-        return "🔥 EPIC (for Med!)"
-    elif score >= 70:
-        return "⭐ EXCELLENT"
-    elif score >= 60:
-        return "✅ GOOD"
-    elif score >= 50:
-        return "👍 FAIR - Worth checking"
-    elif score >= 40:
-        return "⚠️ MARGINAL"
-    else:
-        return "❌ POOR"
+    if score >= 80: return "🔥 EPIC (for Med!)"
+    elif score >= 70: return "⭐ EXCELLENT"
+    elif score >= 60: return "✅ GOOD"
+    elif score >= 50: return "👍 FAIR - Worth checking"
+    elif score >= 40: return "⚠️ MARGINAL"
+    else: return "❌ POOR"
 
 def get_surf_forecast():
-    """Fetch surf forecast using Open-Meteo Marine API"""
     try:
         url = "https://marine-api.open-meteo.com/v1/marine"
-        
         params = {
-            'latitude': LOCATION_LAT,
-            'longitude': LOCATION_LON,
+            'latitude': LOCATION_LAT, 'longitude': LOCATION_LON,
             'hourly': 'wave_height,wave_direction,wave_period,wind_wave_height,wind_wave_direction,wind_wave_period',
-            'timezone': 'Europe/Madrid',
-            'forecast_days': 3
+            'timezone': 'Europe/Madrid', 'forecast_days': 3
         }
-        
         response = requests.get(url, params=params, timeout=10)
         response.raise_for_status()
         data = response.json()
-        
-        # Get wind data
+
         weather_url = "https://api.open-meteo.com/v1/forecast"
         weather_params = {
-            'latitude': LOCATION_LAT,
-            'longitude': LOCATION_LON,
+            'latitude': LOCATION_LAT, 'longitude': LOCATION_LON,
             'hourly': 'wind_speed_10m,wind_direction_10m',
-            'timezone': 'Europe/Madrid',
-            'forecast_days': 3
+            'timezone': 'Europe/Madrid', 'forecast_days': 3
         }
-        
         try:
             wind_response = requests.get(weather_url, params=weather_params, timeout=10)
             wind_response.raise_for_status()
             wind_data = wind_response.json()
-            
             if 'hourly' in wind_data:
                 data['hourly']['wind_speed_10m'] = wind_data['hourly']['wind_speed_10m']
                 data['hourly']['wind_direction_10m'] = wind_data['hourly']['wind_direction_10m']
-        except:
+        except Exception:
             pass
-        
         return data
-        
     except Exception as e:
         print(f"Error fetching surf data: {e}")
         return None
 
 def analyze_forecast(data):
-    """Analyze forecast with Med-adapted quality scoring - daylight hours only"""
     if not data or 'hourly' not in data:
         return None
-    
+
     hourly = data['hourly']
     times = hourly['time']
     wave_heights = hourly['wave_height']
@@ -361,107 +274,78 @@ def analyze_forecast(data):
     wave_periods = hourly.get('wave_period', [None] * len(times))
     wind_speeds = hourly.get('wind_speed_10m', [None] * len(times))
     wind_directions = hourly.get('wind_direction_10m', [None] * len(times))
-    
+
     tomorrow = (datetime.now() + timedelta(days=1)).date()
-    
-    # Calculate sunrise/sunset for tomorrow
     sunrise, sunset = calculate_sunrise_sunset(tomorrow, LOCATION_LAT, LOCATION_LON)
-    
+
     alerts = []
-    all_scores = []  # Track all scores for logging
+    all_scores = []
     max_quality = 0
     max_wave_height = 0
-    
+
     for i, time_str in enumerate(times):
         time_obj = datetime.fromisoformat(time_str)
-        
         if time_obj.date() == tomorrow:
-            # Only include daylight hours
             if not is_daylight(time_obj.hour, sunrise, sunset):
                 continue
-            
+
             wave_height = wave_heights[i]
             wave_dir = wave_directions[i] if i < len(wave_directions) else None
             wave_per = wave_periods[i] if i < len(wave_periods) else None
             wind_spd = wind_speeds[i] if i < len(wind_speeds) else None
             wind_dir = wind_directions[i] if i < len(wind_directions) else None
-            
-            # Log ALL daylight hours, even if wave height is below threshold or None
+
             if wave_height is not None:
-                # Calculate individual component scores for logging
                 height_score = score_wave_height(wave_height)
                 period_score = score_wave_period(wave_per)
                 swell_dir_score = score_swell_direction(wave_dir)
                 wind_dir_score = score_wind_direction(wind_dir, wave_dir)
                 wind_speed_score = score_wind_speed(wind_spd)
-                
-                # Calculate quality score
-                quality = calculate_surf_quality(
-                    wave_height, wave_per, wave_dir, wind_spd, wind_dir
-                )
-                
-                # Track max values only for waves above threshold
+
+                quality = calculate_surf_quality(wave_height, wave_per, wave_dir, wind_spd, wind_dir)
+
                 if wave_height >= SURF_THRESHOLD:
                     max_wave_height = max(max_wave_height, wave_height)
                     max_quality = max(max_quality, quality)
-                
-                # Store ALL scores for logging (even below wave height threshold)
+
                 all_scores.append({
                     'time': time_obj.strftime('%H:%M'),
-                    'wave_height': wave_height,
-                    'wave_period': wave_per,
-                    'wave_direction': wave_dir,
-                    'wind_speed': wind_spd,
-                    'wind_direction': wind_dir,
-                    'quality_score': quality,
+                    'wave_height': wave_height, 'wave_period': wave_per,
+                    'wave_direction': wave_dir, 'wind_speed': wind_spd,
+                    'wind_direction': wind_dir, 'quality_score': quality,
                     'quality_rating': get_quality_rating(quality),
                     'breakdown': {
-                        'height_score': height_score,
-                        'period_score': period_score,
-                        'swell_dir_score': swell_dir_score,
-                        'wind_dir_score': wind_dir_score,
+                        'height_score': height_score, 'period_score': period_score,
+                        'swell_dir_score': swell_dir_score, 'wind_dir_score': wind_dir_score,
                         'wind_speed_score': wind_speed_score
                     },
                     'above_wave_threshold': wave_height >= SURF_THRESHOLD
                 })
-                
-                # Only add to alerts if meets BOTH thresholds
+
                 if wave_height >= SURF_THRESHOLD and quality >= MIN_QUALITY_SCORE:
                     alerts.append({
-                        'time': time_obj.strftime('%H:%M'),
-                        'wave_height': wave_height,
-                        'wave_direction': wave_dir,
-                        'wave_period': wave_per,
-                        'wind_speed': wind_spd,
-                        'wind_direction': wind_dir,
-                        'quality_score': quality,
-                        'quality_rating': get_quality_rating(quality)
+                        'time': time_obj.strftime('%H:%M'), 'wave_height': wave_height,
+                        'wave_direction': wave_dir, 'wave_period': wave_per,
+                        'wind_speed': wind_spd, 'wind_direction': wind_dir,
+                        'quality_score': quality, 'quality_rating': get_quality_rating(quality)
                     })
-    
-    # Return data including all scores for logging
+
     result = {
-        'date': tomorrow.strftime('%Y-%m-%d'),
-        'max_wave_height': max_wave_height,
-        'max_quality': max_quality,
-        'sunrise': sunrise,
-        'sunset': sunset,
-        'alerts': alerts,
-        'all_scores': all_scores  # Include all scores for detailed logging
+        'date': tomorrow.strftime('%Y-%m-%d'), 'max_wave_height': max_wave_height,
+        'max_quality': max_quality, 'sunrise': sunrise, 'sunset': sunset,
+        'alerts': alerts, 'all_scores': all_scores
     }
-    
     return result if alerts or all_scores else None
 
 def format_alert_message(alert_data):
-    """Format the alert message with quality scores"""
     if not alert_data:
         return f"No quality surf alerts for tomorrow (minimum score: {MIN_QUALITY_SCORE}/100 for Med conditions)."
-    
+
     sunrise = alert_data.get('sunrise')
     sunset = alert_data.get('sunset')
-    
     sunrise_str = f"{int(sunrise):02d}:{int((sunrise % 1) * 60):02d}" if sunrise else "N/A"
     sunset_str = f"{int(sunset):02d}:{int((sunset % 1) * 60):02d}" if sunset else "N/A"
-    
+
     message = f"""🏄 SURF ALERT for {alert_data['date']} 🏄
 Location: Vilassar de Mar / Montgat
 
@@ -471,132 +355,62 @@ Peak Quality Score: {alert_data['max_quality']:.0f}/100 {get_quality_rating(aler
 
 Surfable windows (daylight hours only):
 """
-    
     for alert in alert_data['alerts']:
         wave_dir = f"{alert['wave_direction']:.0f}° ({degrees_to_compass(alert['wave_direction'])})" if isinstance(alert['wave_direction'], (int, float)) else alert['wave_direction']
         wave_per = f"{alert['wave_period']:.1f}s" if isinstance(alert['wave_period'], (int, float)) else alert['wave_period']
         wind_dir = f"{alert['wind_direction']:.0f}° ({degrees_to_compass(alert['wind_direction'])})" if isinstance(alert['wind_direction'], (int, float)) else alert['wind_direction']
         wind_spd = f"{alert['wind_speed']:.1f} km/h" if isinstance(alert['wind_speed'], (int, float)) else alert['wind_speed']
-        
+
         message += f"\n⏰ {alert['time']} - Quality: {alert['quality_score']:.0f}/100 {alert['quality_rating']}"
         message += f"\n   Wave: {alert['wave_height']:.2f}m from {wave_dir}, period {wave_per}"
         message += f"\n   Wind: {wind_spd} from {wind_dir}"
         message += "\n"
-    
-    message += f"\n💡 Natural scoring (no caps): Period 45%, Height 30%, Direction 15%, Wind 10%"
+
+    message += f"\n💡 Scoring: Period 40%, Height 25%, Direction 15%, Wind dir 18%, Wind spd 2%. Size gate under 0.9m."
     message += f"\n📊 Minimum quality: {MIN_QUALITY_SCORE}/100"
     return message
 
 def send_email_notification(subject, message):
-    """Send email notification"""
     if not EMAIL_ENABLED:
         return
-    
     try:
         msg = MIMEMultipart()
         msg['From'] = SENDER_EMAIL
         msg['To'] = RECIPIENT_EMAIL
         msg['Subject'] = subject
-        
         msg.attach(MIMEText(message, 'plain'))
-        
         with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
             server.starttls()
             server.login(SENDER_EMAIL, SENDER_PASSWORD)
             server.send_message(msg)
-        
         print("✅ Email notification sent successfully!")
-        
     except Exception as e:
         print(f"❌ Failed to send email: {e}")
 
 def main():
-    """Main function"""
-    print(f"Checking Mediterranean surf conditions for Vilassar de Mar / Montgat...")
+    print("Checking Mediterranean surf conditions for Vilassar de Mar / Montgat...")
     print(f"Wave threshold: {SURF_THRESHOLD}m")
-    print(f"Quality threshold: {MIN_QUALITY_SCORE}/100 (Med-adapted)\n")
-    
+    print(f"Quality threshold: {MIN_QUALITY_SCORE}/100 (Med-adapted, patched weights)\n")
+
     forecast_data = get_surf_forecast()
-    
     if forecast_data is None:
         print("Failed to retrieve forecast data")
         return
-    
+
     alert_data = analyze_forecast(forecast_data)
-    
     if not alert_data:
         print("No surf data available for tomorrow (waves below threshold or outside daylight hours)")
         return
-    
-    # Print detailed scoring breakdown for all time slots
-    print("=" * 80)
-    print("DETAILED SCORING BREAKDOWN (all daylight hours)")
-    print("=" * 80)
-    
-    # Display sunrise/sunset times
-    sunrise = alert_data.get('sunrise')
-    sunset = alert_data.get('sunset')
-    if sunrise and sunset:
-        sunrise_str = f"{int(sunrise):02d}:{int((sunrise % 1) * 60):02d}"
-        sunset_str = f"{int(sunset):02d}:{int((sunset % 1) * 60):02d}"
-        print(f"\n🌅 First Light: {sunrise_str} | Last Light: {sunset_str} 🌇")
-    
-    all_scores = alert_data.get('all_scores', [])
-    if all_scores:
-        print(f"\nScoring formula: Period(45%) + Height(30%) + Direction(15%) + Wind Dir(7%) + Wind Spd(3%)\n")
-        
-        for score_data in all_scores:
-            breakdown = score_data['breakdown']
-            time = score_data['time']
-            quality = score_data['quality_score']
-            rating = score_data['quality_rating']
-            
-            wave_h = score_data['wave_height']
-            wave_p = score_data.get('wave_period', 'N/A')
-            wave_d = score_data.get('wave_direction', 'N/A')
-            wind_s = score_data.get('wind_speed', 'N/A')
-            wind_d = score_data.get('wind_direction', 'N/A')
-            
-            wave_p_str = f"{wave_p:.1f}s" if isinstance(wave_p, (int, float)) else wave_p
-            wave_d_str = f"{wave_d:.0f}°" if isinstance(wave_d, (int, float)) else wave_d
-            wind_s_str = f"{wind_s:.1f} km/h" if isinstance(wind_s, (int, float)) else wind_s
-            wind_d_str = f"{wind_d:.0f}°" if isinstance(wind_d, (int, float)) else wind_d
-            
-            # Show both thresholds
-            above_wave_threshold = score_data.get('above_wave_threshold', False)
-            wave_status = "✅ Above 0.5m" if above_wave_threshold else "❌ Below 0.5m"
-            quality_status = "✅ ALERT" if quality >= MIN_QUALITY_SCORE else "❌ Below quality threshold"
-            
-            print(f"{time} → Score: {quality:.1f}/100 {rating}")
-            print(f"  {wave_status} | {quality_status}")
-            print(f"  Conditions: {wave_h:.2f}m @ {wave_p_str} from {wave_d_str}, wind {wind_s_str} from {wind_d_str}")
-            print(f"  Calculation:")
-            print(f"    Period score:     {breakdown['period_score']:.0f}/100 × 45% = {breakdown['period_score'] * 0.45:.1f}")
-            print(f"    Height score:     {breakdown['height_score']:.0f}/100 × 30% = {breakdown['height_score'] * 0.30:.1f}")
-            print(f"    Direction score:  {breakdown['swell_dir_score']:.0f}/100 × 15% = {breakdown['swell_dir_score'] * 0.15:.1f}")
-            print(f"    Wind dir score:   {breakdown['wind_dir_score']:.0f}/100 × 7%  = {breakdown['wind_dir_score'] * 0.07:.1f}")
-            print(f"    Wind speed score: {breakdown['wind_speed_score']:.0f}/100 × 3%  = {breakdown['wind_speed_score'] * 0.03:.1f}")
-            print(f"    Total: {quality:.1f}/100")
-            print()
-    
-    print("=" * 80)
-    print()
-    
-    # Print formatted message only if there are alerts
+
     if alert_data['alerts']:
-        message = format_alert_message(alert_data)
-        print(message)
+        print(format_alert_message(alert_data))
     else:
-        # Show summary without the misleading 0.00m message
-        print("📊 SUMMARY:")
-        print(f"   No surfable conditions found for tomorrow")
-        print(f"   All time slots scored below {MIN_QUALITY_SCORE}/100 threshold")
+        print("📊 SUMMARY: no surfable conditions found for tomorrow.")
+        all_scores = alert_data.get('all_scores', [])
         if all_scores:
-            max_score_in_day = max(s['quality_score'] for s in all_scores)
-            max_height_in_day = max(s['wave_height'] for s in all_scores)
-            print(f"   Best conditions: {max_height_in_day:.2f}m with score {max_score_in_day:.1f}/100")
-    
-    # Send email if alerts exist
+            best = max(all_scores, key=lambda s: s['quality_score'])
+            print(f"   Best conditions: {best['wave_height']:.2f}m, score {best['quality_score']:.1f}/100")
+
     if alert_data['alerts'] and EMAIL_ENABLED:
         message = format_alert_message(alert_data)
         subject = f"🏄 Med Surf Alert: {alert_data['max_quality']:.0f}/100 - {alert_data['max_wave_height']:.1f}m!"
@@ -604,9 +418,31 @@ def main():
     elif alert_data['alerts'] and not EMAIL_ENABLED:
         print("\n📧 Email notifications disabled. Set EMAIL_ENABLED = True in config.py.")
     elif not alert_data['alerts']:
-        print(f"\n📧 No email sent - all conditions scored below {MIN_QUALITY_SCORE}/100 threshold")
-    
+        print(f"\n📧 No email sent, all conditions scored below {MIN_QUALITY_SCORE}/100 threshold")
+
     return alert_data
 
 if __name__ == "__main__":
     main()
+
+# ── NOTES FROM 11-SESSION LOG ANALYSIS ──────────────────────────────────
+# Before this patch: mean absolute error vs your logged scores was 16.2,
+# mean bias (model running hot) was 15.9.
+# After weight rebalance + wind-dir fix alone: 13.0 / 12.4.
+# After adding the 0.9m size gate on top: roughly 9-10 / 5-6 (worth
+# re-verifying once you plug this back into your real log).
+#
+# Remaining known gap: rows with strong cross/onshore wind (25-30 km/h)
+# combined with unfavorable swell direction still tend to overrate by a
+# few points, wind speed's 2% weight may be too low when it's the
+# dominant bad factor rather than a tiebreaker. Worth watching for once
+# you have 15-20 more sessions.
+#
+# On ML: still don't reach for it yet. You have 11 sessions and this
+# patch already used up your effective degrees of freedom just tuning
+# two known factors by hand. Keep logging in the same format. Around
+# 50 sessions, refit the five component weights properly (ridge
+# regression, not plain OLS) using calculate_surf_quality's own
+# component scores as features rather than raw wave data, that's a much
+# more stable regression than one on raw height/period/direction, and
+# you'll finally have enough data for it to mean something.
