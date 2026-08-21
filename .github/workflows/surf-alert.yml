@@ -1,35 +1,56 @@
-name: Daily Surf Alert
+name: Surf Alert
 
 on:
   schedule:
-    # Run every day at 6:00 PM Madrid time (18:00 CET = 17:00 UTC in winter, 16:00 UTC in summer)
-    # Adjust to your preferred time
-    - cron: '0 17 * * *'  # 5:00 PM UTC = 6:00 PM CET (winter)
-  
-  workflow_dispatch:  # Allows manual triggering from GitHub UI
+    # Daily detailed check, ~6pm CET/CEST
+    # Note: this is a fixed UTC time, so it drifts an hour relative to
+    # local time across the DST change (17:00 UTC = 18:00 CET in winter,
+    # but 19:00 CEST in summer). Not new, was already true before this
+    # change, just flagging it since it affects when the email actually
+    # lands in your inbox depending on season.
+    - cron: '0 17 * * *'
+    # Weekly outlook digest, Monday ~9am CET/CEST
+    - cron: '0 8 * * 1'
+
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Which check to run manually'
+        required: false
+        default: 'daily'
+        type: choice
+        options:
+          - daily
+          - weekly
 
 jobs:
   check-surf:
     runs-on: ubuntu-latest
-    
+
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
-    
+
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
         python-version: '3.11'
-    
+
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
         pip install -r requirements.txt
-    
+
     - name: Run surf alert
       env:
         SURF_ALERT_EMAIL: ${{ secrets.SURF_ALERT_EMAIL }}
         SURF_ALERT_PASSWORD: ${{ secrets.SURF_ALERT_PASSWORD }}
         SURF_ALERT_RECIPIENT: ${{ secrets.SURF_ALERT_RECIPIENT }}
       run: |
-        python surf_alert_email.py
+        if [ "${{ github.event.schedule }}" == "0 8 * * 1" ] || [ "${{ github.event.inputs.mode }}" == "weekly" ]; then
+          echo "Running weekly outlook"
+          python surf_alert_email.py --weekly
+        else
+          echo "Running daily check"
+          python surf_alert_email.py
+        fi
